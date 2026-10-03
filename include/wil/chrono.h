@@ -14,6 +14,7 @@
 #define __WIL_CHRONO_INCLUDED
 
 #include "result_macros.h"
+#include "filetime_helpers.h"
 
 #if WIL_USE_STL && !defined(WIL_NO_CHRONO) && !defined(__WIL_MIN_KERNEL) && !defined(WIL_KERNEL_MODE)
 
@@ -39,18 +40,24 @@ struct file_time
     }
 
     constexpr file_time(const FILETIME& rawValue) WI_NOEXCEPT
-        : value(static_cast<std::uint64_t>(rawValue.dwLowDateTime) | (static_cast<std::uint64_t>(rawValue.dwHighDateTime) << 32))
+        : value(filetime::to_int64<std::uint64_t>(rawValue))
     {
     }
 
-    constexpr FILETIME to_FILETIME() const WI_NOEXCEPT
+    __WI_CONSTEXPR_BIT_CAST FILETIME to_FILETIME() const WI_NOEXCEPT
     {
-        return {static_cast<DWORD>(value), static_cast<DWORD>(value >> 32)};
+        return filetime::from_int64(value);
     }
 };
 
 namespace details
 {
+    constexpr std::int64_t c_unixEpochOffsetInFileTimeTicks = 116444736000000000LL;
+
+    // 2^63 is exactly representable as a floating-point value. Using this exclusive bound avoids converting INT64_MAX to
+    // long double, which rounds up to 2^63 on MSVC where long double has the same precision as double.
+    constexpr long double c_int64ExclusiveMaximum = 9223372036854775808.0L;
+
     template <typename T>
     struct is_chrono_duration : std::false_type
     {
@@ -68,11 +75,6 @@ namespace details
     constexpr long double duration_count_as(Duration value) WI_NOEXCEPT
     {
         return std::chrono::duration<long double, TargetPeriod>{value}.count();
-    }
-
-    constexpr FILETIME file_time_from_raw(std::uint64_t value) WI_NOEXCEPT
-    {
-        return {static_cast<DWORD>(value), static_cast<DWORD>(value >> 32)};
     }
 } // namespace details
 
@@ -136,11 +138,14 @@ struct clock
 private:
     static constexpr std::chrono::time_point<std::chrono::system_clock, std::chrono::seconds> epoch() WI_NOEXCEPT
     {
-        return std::chrono::time_point<std::chrono::system_clock, std::chrono::seconds>{std::chrono::seconds{-11644473600LL}};
+        return std::chrono::time_point<std::chrono::system_clock, std::chrono::seconds>{
+            std::chrono::seconds{-details::c_unixEpochOffsetInFileTimeTicks / filetime_duration::one_second}};
     }
 };
 
-//! Converts any chrono duration to fractional milliseconds for measurement and telemetry.
+//! Converts any chrono duration to fractional milliseconds for measurement and telemetry. Unlike `to_dword_ms`, this preserves
+//! negative values and follows normal floating-point behavior for NaN, infinity, precision loss, and overflow.
+//! For example, `wil::to_float_ms(end - start)` converts an elapsed duration to a floating-point telemetry field.
 template <typename Rep, typename Period>
 constexpr float to_float_ms(std::chrono::duration<Rep, Period> value) WI_NOEXCEPT
 {
@@ -151,11 +156,6 @@ constexpr float to_float_ms(std::chrono::duration<Rep, Period> value) WI_NOEXCEP
 template <typename Rep, typename Period>
 HRESULT try_to_dword_ms(std::chrono::duration<Rep, Period> value, DWORD* result) WI_NOEXCEPT
 {
-    if (result == nullptr)
-    {
-        return E_POINTER;
-    }
-
     const auto milliseconds = details::duration_count_as<std::chrono::duration<Rep, Period>, std::milli>(value);
     if (!(milliseconds >= 0))
     {
@@ -200,11 +200,6 @@ DWORD to_dword_ms(std::chrono::duration<Rep, Period> value)
 template <typename Rep, typename Period>
 HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILETIME* result) WI_NOEXCEPT
 {
-    if (result == nullptr)
-    {
-        return E_POINTER;
-    }
-
     std::int64_t roundedTicks{};
     if constexpr (std::ratio_equal_v<Period, file_time_period> && std::is_integral_v<Rep>)
     {
@@ -230,8 +225,7 @@ HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILE
             return E_INVALIDARG;
         }
 
-        constexpr auto exclusiveMaximum = 9223372036854775808.0L;
-        if (ticks >= exclusiveMaximum)
+        if (ticks >= details::c_int64ExclusiveMaximum)
         {
             return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
         }
@@ -244,18 +238,13 @@ HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILE
     }
 
     const auto encoded = roundedTicks == 0 ? 0ULL : static_cast<std::uint64_t>(-roundedTicks);
-    *result = details::file_time_from_raw(encoded);
+    *result = filetime::from_int64(encoded);
     return S_OK;
 }
 
 template <typename Duration>
 HRESULT try_to_file_time(std::chrono::time_point<clock, Duration> value, FILETIME* result) WI_NOEXCEPT
 {
-    if (result == nullptr)
-    {
-        return E_POINTER;
-    }
-
     if constexpr (std::ratio_equal_v<typename Duration::period, file_time_period> && std::is_integral_v<typename Duration::rep>)
     {
         const auto count = value.time_since_epoch().count();
@@ -271,7 +260,7 @@ HRESULT try_to_file_time(std::chrono::time_point<clock, Duration> value, FILETIM
         {
             return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
         }
-        *result = details::file_time_from_raw(static_cast<std::uint64_t>(count));
+        *result = filetime::from_int64(static_cast<std::uint64_t>(count));
     }
     else
     {
@@ -281,12 +270,11 @@ HRESULT try_to_file_time(std::chrono::time_point<clock, Duration> value, FILETIM
             return E_INVALIDARG;
         }
 
-        constexpr auto exclusiveMaximum = 9223372036854775808.0L;
-        if (ticks >= exclusiveMaximum)
+        if (ticks >= details::c_int64ExclusiveMaximum)
         {
             return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
         }
-        *result = details::file_time_from_raw(static_cast<std::uint64_t>(ticks));
+        *result = filetime::from_int64(static_cast<std::uint64_t>(ticks));
     }
     return S_OK;
 }
@@ -294,53 +282,35 @@ HRESULT try_to_file_time(std::chrono::time_point<clock, Duration> value, FILETIM
 template <typename Duration>
 HRESULT try_to_file_time(std::chrono::time_point<std::chrono::system_clock, Duration> value, FILETIME* result) WI_NOEXCEPT
 {
-    if (result == nullptr)
-    {
-        return E_POINTER;
-    }
-
-    constexpr auto unixEpochOffset = 116444736000000000.0L;
     const auto ticksSinceUnixEpoch = details::duration_count_as<Duration, file_time_period>(value.time_since_epoch());
-    const auto ticksSinceWindowsEpoch = ticksSinceUnixEpoch + unixEpochOffset;
+    const auto ticksSinceWindowsEpoch =
+        ticksSinceUnixEpoch + static_cast<long double>(details::c_unixEpochOffsetInFileTimeTicks);
     if (!(ticksSinceWindowsEpoch >= 0))
     {
         return E_INVALIDARG;
     }
 
-    constexpr auto maximum = static_cast<long double>((std::numeric_limits<std::int64_t>::max)());
-    if (ticksSinceWindowsEpoch > maximum)
+    if (ticksSinceWindowsEpoch >= details::c_int64ExclusiveMaximum)
     {
         return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
     }
 
-    *result = details::file_time_from_raw(static_cast<std::uint64_t>(ticksSinceWindowsEpoch));
+    *result = filetime::from_int64(static_cast<std::uint64_t>(ticksSinceWindowsEpoch));
     return S_OK;
 }
 
 inline HRESULT try_to_system_time(clock::time_point value, SYSTEMTIME* result) WI_NOEXCEPT
 {
-    if (result == nullptr)
-    {
-        return E_POINTER;
-    }
-
     FILETIME fileTime{};
     RETURN_IF_FAILED(try_to_file_time(value, &fileTime));
-    return ::FileTimeToSystemTime(&fileTime, result) ? S_OK : HRESULT_FROM_WIN32(::GetLastError());
+    RETURN_IF_WIN32_BOOL_FALSE(::FileTimeToSystemTime(&fileTime, result));
+    return S_OK;
 }
 
 inline HRESULT try_from_system_time(const SYSTEMTIME& value, clock::time_point* result) WI_NOEXCEPT
 {
-    if (result == nullptr)
-    {
-        return E_POINTER;
-    }
-
     FILETIME fileTime{};
-    if (!::SystemTimeToFileTime(&value, &fileTime))
-    {
-        return HRESULT_FROM_WIN32(::GetLastError());
-    }
+    RETURN_IF_WIN32_BOOL_FALSE(::SystemTimeToFileTime(&value, &fileTime));
 
     *result = clock::from_file_time(file_time{fileTime});
     return S_OK;
@@ -403,6 +373,9 @@ namespace details
 } // namespace details
 
 //! Schedules a threadpool timer relative to the current time.
+//! @code
+//! RETURN_IF_FAILED(wil::set_relative_threadpool_timer_nothrow(timer.get(), std::chrono::milliseconds{250}));
+//! @endcode
 template <
     typename DueDuration,
     typename PeriodDuration = std::chrono::milliseconds,
@@ -427,6 +400,10 @@ HRESULT set_relative_threadpool_timer_nothrow(
 }
 
 //! Schedules a threadpool timer for an absolute WIL or system clock time.
+//! @code
+//! RETURN_IF_FAILED(
+//!     wil::set_threadpool_timer_nothrow(timer.get(), std::chrono::system_clock::now() + std::chrono::seconds{1}));
+//! @endcode
 template <
     typename Clock,
     typename DueDuration,

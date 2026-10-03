@@ -21,6 +21,7 @@
 #include <objbase.h>
 
 #include "common.h"
+#include "filetime_helpers.h"
 
 #if WIL_USE_STL
 #include <string>
@@ -28,22 +29,11 @@
 #include <string_view>
 #endif
 #if (__WI_LIBCPP_STD_VER >= 20)
-#if WI_HAS_INCLUDE(<bit>, 1) // Assume present if C++20
-#include <bit>
-#endif
 #if WI_HAS_INCLUDE(<compare>, 1) // Assume present if C++20
 #include <compare>
 #endif
 #endif
 #endif
-
-/// @cond
-#if WIL_USE_STL && (__cpp_lib_bit_cast >= 201806L)
-#define __WI_CONSTEXPR_BIT_CAST constexpr
-#else
-#define __WI_CONSTEXPR_BIT_CAST // All uses are templates, which is implicitly inline
-#endif
-/// @endcond
 
 #include "result.h"
 #include "resource.h"
@@ -204,59 +194,8 @@ Use ordinal comparisons for resource identifiers such as filenames, registry key
 #pragma endregion
 
 #pragma region FILETIME helpers
-//! Common FILETIME durations, expressed in the 100-nanosecond units that `FILETIME` uses.
-namespace filetime_duration
-{
-    //! One millisecond, in 100-nanosecond units.
-    long long const one_millisecond = 10000LL;
-    //! One second, in 100-nanosecond units.
-    long long const one_second = 10000000LL;
-    //! One minute, in 100-nanosecond units.
-    long long const one_minute = 10000000LL * 60;        // 600000000    or 600000000LL
-    //! One hour, in 100-nanosecond units.
-    long long const one_hour = 10000000LL * 60 * 60;     // 36000000000  or 36000000000LL
-    //! One day, in 100-nanosecond units.
-    long long const one_day = 10000000LL * 60 * 60 * 24; // 864000000000 or 864000000000LL
-}; // namespace filetime_duration
-
 namespace filetime
 {
-    /// Reinterprets a `FILETIME` as a 64-bit integer count of 100-nanosecond units.
-    /// @tparam Int64 A 64-bit integral type to return the value as; defaults to `unsigned long long`.
-    /// @param val The `FILETIME` to convert.
-    /// @return The `FILETIME` reinterpreted as a single 64-bit integer.
-    template <typename Int64 = unsigned long long, wistd::enable_if_t<wistd::is_integral_v<Int64> && (sizeof(Int64) == sizeof(FILETIME)), int> = 0>
-    constexpr Int64 to_int64(const FILETIME& val) WI_NOEXCEPT
-    {
-#if WIL_USE_STL && (__cpp_lib_bit_cast >= 201806L)
-        return std::bit_cast<Int64>(val);
-#else
-        // Cannot reinterpret_cast FILETIME* to Int64* due to alignment differences.
-        return (static_cast<Int64>(val.dwHighDateTime) << 32) + val.dwLowDateTime;
-#endif
-    }
-
-    /// @cond
-    namespace details
-    {
-        template <typename Int>
-        using select_int64 =
-            wistd::conditional_t<sizeof(Int) == 8, Int, wistd::conditional_t<wistd::is_signed_v<Int>, long long, unsigned long long>>;
-    }
-    /// @endcond
-
-    /// Converts an integer count of 100-nanosecond units into a `FILETIME`.
-    /// @tparam Int An integral type no larger than `FILETIME` (8 bytes).
-    /// @param val The 100-nanosecond count to convert.
-    /// @return A `FILETIME` representing the given count.
-    template <typename Int, wistd::enable_if_t<wistd::is_integral_v<Int> && (sizeof(Int) <= sizeof(FILETIME)), int> = 0>
-    __WI_CONSTEXPR_BIT_CAST FILETIME from_int64(Int val) WI_NOEXCEPT
-    {
-        using Int64 = details::select_int64<Int>;
-        const auto i64 = static_cast<unsigned long long>(static_cast<Int64>(val));
-        return {static_cast<DWORD>(i64), static_cast<DWORD>(i64 >> 32)};
-    }
-
     /// Adds a 100-nanosecond delta to a `FILETIME` and returns the resulting time.
     /// @tparam Int An integral type no larger than `FILETIME` (8 bytes).
     /// @param baseTime The starting time.

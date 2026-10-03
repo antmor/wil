@@ -34,7 +34,7 @@ TEST_CASE("CppWinRTTests::CppWinRT20Test", "[cppwinrt]")
 
 TEST_CASE("CppWinRTTests::ChronoInterop", "[cppwinrt][chrono]")
 {
-    const auto time = wil::clock::time_point{wil::clock::duration{116444736000000000LL}};
+    const auto time = wil::clock::from_sys(std::chrono::system_clock::time_point{});
     const auto dateTime = wil::to_winrt_datetime(time);
     REQUIRE(wil::from_winrt_datetime(dateTime) == time);
 
