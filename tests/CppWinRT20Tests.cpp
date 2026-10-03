@@ -7,6 +7,9 @@
 #include <inspectable.h> // Must be included before base.h
 
 #include <winrt/base.h>
+#include <winrt/Windows.Foundation.h>
+#include <wil/chrono.h>
+#include <wil/cppwinrt_helpers.h>
 #include <wil/result.h>
 
 #include "common.h"
@@ -27,4 +30,17 @@ TEST_CASE("CppWinRTTests::CppWinRT20Test", "[cppwinrt]")
     test(E_OUTOFMEMORY);
     test(E_INVALIDARG);
     test(E_UNEXPECTED);
+}
+
+TEST_CASE("CppWinRTTests::ChronoInterop", "[cppwinrt][chrono]")
+{
+    const auto time = wil::clock::time_point{wil::clock::duration{116444736000000000LL}};
+    const auto dateTime = wil::to_winrt_datetime(time);
+    REQUIRE(wil::from_winrt_datetime(dateTime) == time);
+
+    const auto duration = wil::clock::duration{1234567};
+    REQUIRE(wil::from_winrt_timespan(wil::to_winrt_timespan(duration)) == duration);
+
+    const wil::file_time fileTime{0xfedcba9876543210ULL};
+    REQUIRE(wil::from_winrt_file_time(wil::to_winrt_file_time(fileTime)).value == fileTime.value);
 }

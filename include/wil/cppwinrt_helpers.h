@@ -11,6 +11,8 @@
 //! @file
 //! Helpers for common patterns and tasks when using C++/WinRT.
 
+#include "chrono.h"
+
 #ifndef __WIL_CPPWINRT_HELPERS_DEFINED
 #define __WIL_CPPWINRT_HELPERS_DEFINED
 
@@ -528,6 +530,51 @@ auto batched_range(TSrc src)
 #define __WIL_CPPWINRT_WINDOWS_FOUNDATION_HELPERS
 namespace wil
 {
+#if WIL_USE_STL && !defined(WIL_NO_CHRONO)
+//! Converts a C++/WinRT DateTime to the representation-compatible WIL clock.
+inline constexpr clock::time_point from_winrt_datetime(winrt::Windows::Foundation::DateTime value) noexcept
+{
+    static_assert(
+        std::ratio_equal_v<clock::period, winrt::Windows::Foundation::DateTime::duration::period>,
+        "WIL and C++/WinRT clocks must use the same period");
+    return clock::time_point{clock::duration{value.time_since_epoch().count()}};
+}
+
+//! Converts a WIL clock value to the representation-compatible C++/WinRT DateTime.
+inline constexpr winrt::Windows::Foundation::DateTime to_winrt_datetime(clock::time_point value) noexcept
+{
+    return winrt::Windows::Foundation::DateTime{
+        winrt::Windows::Foundation::DateTime::duration{value.time_since_epoch().count()}};
+}
+
+//! Converts a C++/WinRT TimeSpan to the representation-compatible WIL clock duration.
+inline constexpr clock::duration from_winrt_timespan(winrt::Windows::Foundation::TimeSpan value) noexcept
+{
+    static_assert(
+        std::ratio_equal_v<clock::period, winrt::Windows::Foundation::TimeSpan::period>,
+        "WIL and C++/WinRT durations must use the same period");
+    return clock::duration{value.count()};
+}
+
+//! Converts a WIL clock duration to the representation-compatible C++/WinRT TimeSpan.
+inline constexpr winrt::Windows::Foundation::TimeSpan to_winrt_timespan(clock::duration value) noexcept
+{
+    return winrt::Windows::Foundation::TimeSpan{value.count()};
+}
+
+//! Converts a C++/WinRT file_time to WIL's raw FILETIME wrapper.
+inline constexpr file_time from_winrt_file_time(winrt::file_time value) noexcept
+{
+    return file_time{value.value};
+}
+
+//! Converts WIL's raw FILETIME wrapper to C++/WinRT file_time.
+inline constexpr winrt::file_time to_winrt_file_time(file_time value) noexcept
+{
+    return winrt::file_time{value.value};
+}
+#endif
+
 /// @cond
 namespace details
 {

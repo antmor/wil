@@ -253,15 +253,8 @@ namespace filetime
     __WI_CONSTEXPR_BIT_CAST FILETIME from_int64(Int val) WI_NOEXCEPT
     {
         using Int64 = details::select_int64<Int>;
-        auto i64 = static_cast<Int64>(val);
-
-#if WIL_USE_STL && (__cpp_lib_bit_cast >= 201806L)
-        return std::bit_cast<FILETIME>(i64);
-#else
-        static_assert(sizeof(i64) == sizeof(FILETIME), "sizes don't match");
-        static_assert(__alignof(Int64) >= __alignof(FILETIME), "alignment not compatible with type pun");
-        return *reinterpret_cast<FILETIME*>(&i64);
-#endif
+        const auto i64 = static_cast<unsigned long long>(static_cast<Int64>(val));
+        return {static_cast<DWORD>(i64), static_cast<DWORD>(i64 >> 32)};
     }
 
     /// Adds a 100-nanosecond delta to a `FILETIME` and returns the resulting time.
