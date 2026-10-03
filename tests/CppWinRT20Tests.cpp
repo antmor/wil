@@ -12,6 +12,8 @@
 #include <wil/cppwinrt_helpers.h>
 #include <wil/result.h>
 
+#include <format>
+
 #include "common.h"
 
 TEST_CASE("CppWinRTTests::CppWinRT20Test", "[cppwinrt]")
@@ -37,6 +39,7 @@ TEST_CASE("CppWinRTTests::ChronoInterop", "[cppwinrt][chrono]")
     const auto time = wil::clock::from_sys(std::chrono::system_clock::time_point{});
     const auto dateTime = wil::to_winrt_datetime(time);
     REQUIRE(wil::from_winrt_datetime(dateTime) == time);
+    REQUIRE(std::format("{:%Y-%m-%d %H:%M:%S}", wil::clock::to_sys(time)) == "1970-01-01 00:00:00.0000000");
 
     const auto duration = wil::clock::duration{1234567};
     REQUIRE(wil::from_winrt_timespan(wil::to_winrt_timespan(duration)) == duration);

@@ -52,10 +52,13 @@ struct file_time
 
 namespace details
 {
+    // Number of 100-nanosecond ticks between the FILETIME epoch (January 1, 1601 UTC) and the Unix epoch
+    // (January 1, 1970 UTC).
     constexpr std::int64_t c_unixEpochOffsetInFileTimeTicks = 116444736000000000LL;
 
-    // 2^63 is exactly representable as a floating-point value. Using this exclusive bound avoids converting INT64_MAX to
-    // long double, which rounds up to 2^63 on MSVC where long double has the same precision as double.
+    // 9223372036854775808 is 2^63, one past INT64_MAX, and is exactly representable as a floating-point value. Using this
+    // exclusive bound avoids converting INT64_MAX to long double, which rounds up to 2^63 on MSVC where long double has the
+    // same precision as double.
     constexpr long double c_int64ExclusiveMaximum = 9223372036854775808.0L;
 
     template <typename T>
@@ -75,6 +78,172 @@ namespace details
     constexpr long double duration_count_as(Duration value) WI_NOEXCEPT
     {
         return std::chrono::duration<long double, TargetPeriod>{value}.count();
+    }
+
+    template <typename Duration>
+    using file_time_ratio_t = std::ratio_divide<typename Duration::period, file_time_period>;
+
+    inline HRESULT try_unsigned_multiply_divide(
+        std::uintmax_t multiplicand,
+        std::uintmax_t multiplier,
+        std::uintmax_t divisor,
+        std::uintmax_t maximum,
+        std::uintmax_t* result,
+        std::uintmax_t* remainderResult) WI_NOEXCEPT
+    {
+        const auto multiplierQuotient = multiplier / divisor;
+        const auto multiplierRemainder = multiplier % divisor;
+        std::uintmax_t quotient{};
+        std::uintmax_t remainder{};
+
+        for (int bitIndex = std::numeric_limits<std::uintmax_t>::digits - 1; bitIndex >= 0; --bitIndex)
+        {
+            const bool bit = ((multiplicand >> bitIndex) & 1) != 0;
+
+            if (quotient > maximum / 2)
+            {
+                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+            }
+            quotient *= 2;
+
+            if (bit)
+            {
+                if (multiplierQuotient > maximum - quotient)
+                {
+                    return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+                }
+                quotient += multiplierQuotient;
+            }
+
+            std::uintmax_t carry{};
+            if (remainder >= divisor - remainder)
+            {
+                remainder -= divisor - remainder;
+                ++carry;
+            }
+            else
+            {
+                remainder += remainder;
+            }
+
+            if (bit && multiplierRemainder != 0)
+            {
+                if (remainder >= divisor - multiplierRemainder)
+                {
+                    remainder -= divisor - multiplierRemainder;
+                    ++carry;
+                }
+                else
+                {
+                    remainder += multiplierRemainder;
+                }
+            }
+
+            if (carry > maximum - quotient)
+            {
+                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+            }
+            quotient += carry;
+        }
+
+        *result = quotient;
+        *remainderResult = remainder;
+        return S_OK;
+    }
+
+    template <typename Duration>
+    HRESULT try_integral_duration_floor_as_file_time_ticks(Duration value, std::int64_t* result) WI_NOEXCEPT
+    {
+        static_assert(std::is_integral_v<typename Duration::rep>);
+        using ratio = file_time_ratio_t<Duration>;
+        using rep = typename Duration::rep;
+        constexpr auto multiplier = static_cast<std::uintmax_t>(ratio::num);
+        constexpr auto divisor = static_cast<std::uintmax_t>(ratio::den);
+
+        if constexpr (std::is_signed_v<rep>)
+        {
+            static_assert(sizeof(rep) <= sizeof(std::int64_t));
+            const auto count = static_cast<std::int64_t>(value.count());
+            const bool negative = count < 0;
+            const auto magnitude = negative ?
+                                       static_cast<std::uintmax_t>(-(count + 1)) + 1 :
+                                       static_cast<std::uintmax_t>(count);
+            const auto maximumMagnitude =
+                negative ?
+                    static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)()) + 1 :
+                    static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)());
+
+            std::uintmax_t converted{};
+            std::uintmax_t remainder{};
+            RETURN_IF_FAILED(
+                try_unsigned_multiply_divide(magnitude, multiplier, divisor, maximumMagnitude, &converted, &remainder));
+
+            if (negative && remainder != 0)
+            {
+                if (converted == maximumMagnitude)
+                {
+                    return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+                }
+                ++converted;
+            }
+
+            if (negative)
+            {
+                *result = converted == maximumMagnitude ?
+                              (std::numeric_limits<std::int64_t>::min)() :
+                              -static_cast<std::int64_t>(converted);
+            }
+            else
+            {
+                *result = static_cast<std::int64_t>(converted);
+            }
+        }
+        else
+        {
+            static_assert(sizeof(rep) <= sizeof(std::uint64_t));
+            const auto count = static_cast<std::uint64_t>(value.count());
+            std::uintmax_t converted{};
+            std::uintmax_t remainder{};
+            RETURN_IF_FAILED(try_unsigned_multiply_divide(
+                count,
+                multiplier,
+                divisor,
+                static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)()),
+                &converted,
+                &remainder));
+            *result = static_cast<std::int64_t>(converted);
+        }
+
+        return S_OK;
+    }
+
+    template <typename Rep, typename Period>
+    HRESULT try_to_dword_ms_with_maximum(
+        std::chrono::duration<Rep, Period> value, DWORD maximum, DWORD* result) WI_NOEXCEPT
+    {
+        const auto milliseconds = duration_count_as<std::chrono::duration<Rep, Period>, std::milli>(value);
+        if (!(milliseconds >= 0))
+        {
+            return E_INVALIDARG;
+        }
+
+        if (milliseconds > static_cast<long double>(maximum))
+        {
+            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+        }
+
+        auto converted = static_cast<DWORD>(milliseconds);
+        if (static_cast<long double>(converted) < milliseconds)
+        {
+            if (converted == maximum)
+            {
+                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+            }
+            ++converted;
+        }
+
+        *result = converted;
+        return S_OK;
     }
 } // namespace details
 
@@ -156,26 +325,7 @@ constexpr float to_float_ms(std::chrono::duration<Rep, Period> value) WI_NOEXCEP
 template <typename Rep, typename Period>
 HRESULT try_to_dword_ms(std::chrono::duration<Rep, Period> value, DWORD* result) WI_NOEXCEPT
 {
-    const auto milliseconds = details::duration_count_as<std::chrono::duration<Rep, Period>, std::milli>(value);
-    if (!(milliseconds >= 0))
-    {
-        return E_INVALIDARG;
-    }
-
-    constexpr auto maximum = static_cast<long double>(INFINITE - 1);
-    if (milliseconds > maximum)
-    {
-        return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-    }
-
-    auto converted = static_cast<DWORD>(milliseconds);
-    if (static_cast<long double>(converted) < milliseconds)
-    {
-        ++converted;
-    }
-
-    *result = converted;
-    return S_OK;
+    return details::try_to_dword_ms_with_maximum(value, INFINITE - 1, result);
 }
 
 template <typename Rep, typename Period>
@@ -245,22 +395,15 @@ HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILE
 template <typename Duration>
 HRESULT try_to_file_time(std::chrono::time_point<clock, Duration> value, FILETIME* result) WI_NOEXCEPT
 {
-    if constexpr (std::ratio_equal_v<typename Duration::period, file_time_period> && std::is_integral_v<typename Duration::rep>)
+    if constexpr (std::is_integral_v<typename Duration::rep>)
     {
-        const auto count = value.time_since_epoch().count();
-        if constexpr (std::is_signed_v<typename Duration::rep>)
+        std::int64_t ticks{};
+        RETURN_IF_FAILED(details::try_integral_duration_floor_as_file_time_ticks(value.time_since_epoch(), &ticks));
+        if (ticks < 0)
         {
-            if (count < 0)
-            {
-                return E_INVALIDARG;
-            }
+            return E_INVALIDARG;
         }
-
-        if (static_cast<std::uintmax_t>(count) > static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)()))
-        {
-            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-        }
-        *result = filetime::from_int64(static_cast<std::uint64_t>(count));
+        *result = filetime::from_int64(ticks);
     }
     else
     {
@@ -282,20 +425,41 @@ HRESULT try_to_file_time(std::chrono::time_point<clock, Duration> value, FILETIM
 template <typename Duration>
 HRESULT try_to_file_time(std::chrono::time_point<std::chrono::system_clock, Duration> value, FILETIME* result) WI_NOEXCEPT
 {
-    const auto ticksSinceUnixEpoch = details::duration_count_as<Duration, file_time_period>(value.time_since_epoch());
-    const auto ticksSinceWindowsEpoch =
-        ticksSinceUnixEpoch + static_cast<long double>(details::c_unixEpochOffsetInFileTimeTicks);
-    if (!(ticksSinceWindowsEpoch >= 0))
+    if constexpr (std::is_integral_v<typename Duration::rep>)
     {
-        return E_INVALIDARG;
-    }
+        std::int64_t ticksSinceUnixEpoch{};
+        RETURN_IF_FAILED(
+            details::try_integral_duration_floor_as_file_time_ticks(value.time_since_epoch(), &ticksSinceUnixEpoch));
 
-    if (ticksSinceWindowsEpoch >= details::c_int64ExclusiveMaximum)
+        if (ticksSinceUnixEpoch < -details::c_unixEpochOffsetInFileTimeTicks)
+        {
+            return E_INVALIDARG;
+        }
+        if (ticksSinceUnixEpoch >
+            (std::numeric_limits<std::int64_t>::max)() - details::c_unixEpochOffsetInFileTimeTicks)
+        {
+            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+        }
+
+        *result = filetime::from_int64(ticksSinceUnixEpoch + details::c_unixEpochOffsetInFileTimeTicks);
+    }
+    else
     {
-        return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-    }
+        const auto ticksSinceUnixEpoch = details::duration_count_as<Duration, file_time_period>(value.time_since_epoch());
+        const auto ticksSinceWindowsEpoch =
+            ticksSinceUnixEpoch + static_cast<long double>(details::c_unixEpochOffsetInFileTimeTicks);
+        if (!(ticksSinceWindowsEpoch >= 0))
+        {
+            return E_INVALIDARG;
+        }
 
-    *result = filetime::from_int64(static_cast<std::uint64_t>(ticksSinceWindowsEpoch));
+        if (ticksSinceWindowsEpoch >= details::c_int64ExclusiveMaximum)
+        {
+            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+        }
+
+        *result = filetime::from_int64(static_cast<std::uint64_t>(ticksSinceWindowsEpoch));
+    }
     return S_OK;
 }
 
@@ -353,8 +517,8 @@ namespace details
         DueDuration due, PeriodDuration period, WindowDuration window, FILETIME* dueTime, DWORD* periodMilliseconds, DWORD* windowMilliseconds) WI_NOEXCEPT
     {
         RETURN_IF_FAILED(try_to_relative_file_time(due, dueTime));
-        RETURN_IF_FAILED(try_to_dword_ms(period, periodMilliseconds));
-        return try_to_dword_ms(window, windowMilliseconds);
+        RETURN_IF_FAILED(try_to_dword_ms_with_maximum(period, (std::numeric_limits<DWORD>::max)(), periodMilliseconds));
+        return try_to_dword_ms_with_maximum(window, (std::numeric_limits<DWORD>::max)(), windowMilliseconds);
     }
 
     template <typename Clock, typename DueDuration, typename PeriodDuration, typename WindowDuration>
@@ -367,15 +531,20 @@ namespace details
         DWORD* windowMilliseconds) WI_NOEXCEPT
     {
         RETURN_IF_FAILED(try_to_file_time(due, dueTime));
-        RETURN_IF_FAILED(try_to_dword_ms(period, periodMilliseconds));
-        return try_to_dword_ms(window, windowMilliseconds);
+        RETURN_IF_FAILED(try_to_dword_ms_with_maximum(period, (std::numeric_limits<DWORD>::max)(), periodMilliseconds));
+        return try_to_dword_ms_with_maximum(window, (std::numeric_limits<DWORD>::max)(), windowMilliseconds);
     }
 } // namespace details
 
-//! Schedules a threadpool timer relative to the current time.
-//! @code
-//! RETURN_IF_FAILED(wil::set_relative_threadpool_timer_nothrow(timer.get(), std::chrono::milliseconds{250}));
-//! @endcode
+/** Schedules a threadpool timer relative to the current time.
+Use the `_nothrow` form to return conversion failures, the `_failfast` form when invalid values are fatal, or the throwing form
+when exceptions are enabled.
+@code
+RETURN_IF_FAILED(wil::set_relative_threadpool_timer_nothrow(timer.get(), std::chrono::milliseconds{250}));
+wil::set_relative_threadpool_timer_failfast(timer.get(), std::chrono::milliseconds{250});
+wil::set_relative_threadpool_timer(timer.get(), std::chrono::milliseconds{250});
+@endcode
+*/
 template <
     typename DueDuration,
     typename PeriodDuration = std::chrono::milliseconds,
@@ -399,11 +568,16 @@ HRESULT set_relative_threadpool_timer_nothrow(
     return S_OK;
 }
 
-//! Schedules a threadpool timer for an absolute WIL or system clock time.
-//! @code
-//! RETURN_IF_FAILED(
-//!     wil::set_threadpool_timer_nothrow(timer.get(), std::chrono::system_clock::now() + std::chrono::seconds{1}));
-//! @endcode
+/** Schedules a threadpool timer for an absolute WIL or system clock time.
+Use the `_nothrow` form to return conversion failures, the `_failfast` form when invalid values are fatal, or the throwing form
+when exceptions are enabled.
+@code
+const auto due = std::chrono::system_clock::now() + std::chrono::seconds{1};
+RETURN_IF_FAILED(wil::set_threadpool_timer_nothrow(timer.get(), due));
+wil::set_threadpool_timer_failfast(timer.get(), due);
+wil::set_threadpool_timer(timer.get(), due);
+@endcode
+*/
 template <
     typename Clock,
     typename DueDuration,

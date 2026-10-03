@@ -34,6 +34,8 @@
 namespace wil
 {
 //! Common FILETIME durations, expressed in the 100-nanosecond units that `FILETIME` uses.
+//! Prefer `std::chrono` durations and `wil::clock` when chrono support is available. These constants support low-level FILETIME
+//! arithmetic and callers that cannot use the STL.
 namespace filetime_duration
 {
     //! One millisecond, in 100-nanosecond units.
