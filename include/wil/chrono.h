@@ -26,15 +26,8 @@
 
 namespace wil
 {
-using file_time_period = std::ratio<1, 10000000>;
-
 namespace details
 {
-    inline FILETIME file_time_from_uint64(std::uint64_t value) WI_NOEXCEPT
-    {
-        return {static_cast<DWORD>(value), static_cast<DWORD>(value >> 32)};
-    }
-
     template <typename Duration, typename TargetPeriod>
     struct is_supported_duration_conversion : std::false_type
     {
@@ -147,93 +140,32 @@ DWORD to_dword_ms(std::chrono::duration<Rep, Period> value)
 }
 #endif
 
-//! Encodes a nonnegative duration as the signed relative FILETIME representation used by threadpool timers.
-template <typename Rep, typename Period, details::enable_if_supported_duration_conversion_t<std::chrono::duration<Rep, Period>, file_time_period> = 0>
-HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILETIME* result) WI_NOEXCEPT
-{
-    std::uint64_t roundedTicks{};
-    RETURN_IF_FAILED((details::try_nonnegative_duration_ceiling<std::chrono::duration<Rep, Period>, file_time_period>(
-        value, static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()), &roundedTicks)));
-    // SetThreadpoolTimer interprets negative 100-nanosecond counts as relative time. Form the two's-complement
-    // representation explicitly; zero remains an immediate due time rather than a negative interval.
-    const auto encoded = roundedTicks == 0 ? 0ULL : (~static_cast<std::uint64_t>(roundedTicks)) + 1;
-    *result = details::file_time_from_uint64(encoded);
-    return S_OK;
-}
-
-namespace details
-{
-    template <typename DueDuration, typename PeriodDuration, typename WindowDuration>
-    HRESULT prepare_threadpool_timer(
-        DueDuration due, PeriodDuration period, WindowDuration window, FILETIME* dueTime, DWORD* periodMilliseconds, DWORD* windowMilliseconds) WI_NOEXCEPT
-    {
-        RETURN_IF_FAILED(try_to_relative_file_time(due, dueTime));
-        RETURN_IF_FAILED(try_to_dword_ms_with_maximum(period, (std::numeric_limits<DWORD>::max)(), periodMilliseconds));
-        return try_to_dword_ms_with_maximum(window, (std::numeric_limits<DWORD>::max)(), windowMilliseconds);
-    }
-
-} // namespace details
-
-/** Schedules a threadpool timer relative to the current time.
-Use the `_nothrow` form to return conversion failures, the `_failfast` form when invalid values are fatal, or the throwing form
-when exceptions are enabled.
-@code
-RETURN_IF_FAILED(wil::set_relative_threadpool_timer_nothrow(timer.get(), std::chrono::milliseconds{250}));
-wil::set_relative_threadpool_timer_failfast(timer.get(), std::chrono::milliseconds{250});
-wil::set_relative_threadpool_timer(timer.get(), std::chrono::milliseconds{250});
-@endcode
-*/
-template <
-    typename DueDuration,
-    typename PeriodDuration = std::chrono::milliseconds,
-    typename WindowDuration = std::chrono::milliseconds,
-    details::enable_if_supported_duration_conversion_t<DueDuration, file_time_period> = 0,
-    details::enable_if_supported_duration_conversion_t<PeriodDuration, std::milli> = 0,
-    details::enable_if_supported_duration_conversion_t<WindowDuration, std::milli> = 0>
-HRESULT set_relative_threadpool_timer_nothrow(
-    PTP_TIMER timer, DueDuration due, PeriodDuration period = PeriodDuration::zero(), WindowDuration window = WindowDuration::zero()) WI_NOEXCEPT
-{
-    if (timer == nullptr)
-    {
-        return E_INVALIDARG;
-    }
-
-    FILETIME dueTime{};
-    DWORD periodMilliseconds{};
-    DWORD windowMilliseconds{};
-    RETURN_IF_FAILED(details::prepare_threadpool_timer(due, period, window, &dueTime, &periodMilliseconds, &windowMilliseconds));
-    ::SetThreadpoolTimer(timer, &dueTime, periodMilliseconds, windowMilliseconds);
-    return S_OK;
-}
-
-template <typename... Args>
-void set_relative_threadpool_timer_failfast(Args&&... args) WI_NOEXCEPT
-{
-    FAIL_FAST_IF_FAILED(set_relative_threadpool_timer_nothrow(std::forward<Args>(args)...));
-}
-
-#if defined(WIL_ENABLE_EXCEPTIONS)
-template <typename... Args>
-void set_relative_threadpool_timer(Args&&... args)
-{
-    THROW_IF_FAILED(set_relative_threadpool_timer_nothrow(std::forward<Args>(args)...));
-}
-#endif
-
 } // namespace wil
 
 #endif // WIL_USE_STL && !defined(WIL_NO_CHRONO) && !defined(__WIL_MIN_KERNEL) && !defined(WIL_KERNEL_MODE)
 #endif // __WIL_CHRONO_INCLUDED
 
 // Keep C++/WinRT-dependent helpers outside the primary include guard. A caller may include this header for the generic
-// duration helpers, include winrt/base.h later, and then include this header again to enable the clock-specific surface.
+// duration helpers, include winrt/base.h later, and then include this header again to enable FILETIME and timer helpers.
 #if WIL_USE_STL && !defined(WIL_NO_CHRONO) && !defined(__WIL_MIN_KERNEL) && !defined(WIL_KERNEL_MODE) && \
     defined(WINRT_BASE_H) && !defined(__WIL_CHRONO_WINRT_CLOCK)
 #define __WIL_CHRONO_WINRT_CLOCK
 
 namespace wil
 {
-static_assert(std::ratio_equal_v<winrt::clock::period, file_time_period>, "C++/WinRT clock must use the Windows FILETIME period");
+//! Encodes a nonnegative duration as the signed relative FILETIME representation used by threadpool timers.
+template <typename Rep, typename Period, details::enable_if_supported_duration_conversion_t<std::chrono::duration<Rep, Period>, winrt::clock::period> = 0>
+HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILETIME* result) WI_NOEXCEPT
+{
+    std::uint64_t roundedTicks{};
+    RETURN_IF_FAILED((details::try_nonnegative_duration_ceiling<std::chrono::duration<Rep, Period>, winrt::clock::period>(
+        value, static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()), &roundedTicks)));
+    // SetThreadpoolTimer interprets negative 100-nanosecond counts as relative time. Form the two's-complement
+    // representation explicitly; zero remains an immediate due time rather than a negative interval.
+    const auto encoded = roundedTicks == 0 ? 0ULL : (~roundedTicks) + 1;
+    *result = static_cast<FILETIME>(winrt::file_time{encoded});
+    return S_OK;
+}
 
 inline HRESULT try_to_file_time(winrt::clock::time_point value, FILETIME* result) WI_NOEXCEPT
 {
@@ -243,7 +175,7 @@ inline HRESULT try_to_file_time(winrt::clock::time_point value, FILETIME* result
         return E_INVALIDARG;
     }
 
-    *result = details::file_time_from_uint64(static_cast<std::uint64_t>(ticks));
+    *result = static_cast<FILETIME>(winrt::clock::to_file_time(value));
     return S_OK;
 }
 
@@ -320,6 +252,54 @@ namespace details
         return S_OK;
     }
 } // namespace details
+
+/** Schedules a threadpool timer relative to the current time.
+Use the `_nothrow` form to return conversion failures, the `_failfast` form when invalid values are fatal, or the throwing form
+when exceptions are enabled.
+@code
+RETURN_IF_FAILED(wil::set_relative_threadpool_timer_nothrow(timer.get(), std::chrono::milliseconds{250}));
+wil::set_relative_threadpool_timer_failfast(timer.get(), std::chrono::milliseconds{250});
+wil::set_relative_threadpool_timer(timer.get(), std::chrono::milliseconds{250});
+@endcode
+*/
+template <
+    typename DueDuration,
+    typename PeriodDuration = std::chrono::milliseconds,
+    typename WindowDuration = std::chrono::milliseconds,
+    details::enable_if_supported_duration_conversion_t<DueDuration, winrt::clock::period> = 0,
+    details::enable_if_supported_duration_conversion_t<PeriodDuration, std::milli> = 0,
+    details::enable_if_supported_duration_conversion_t<WindowDuration, std::milli> = 0>
+HRESULT set_relative_threadpool_timer_nothrow(
+    PTP_TIMER timer, DueDuration due, PeriodDuration period = PeriodDuration::zero(), WindowDuration window = WindowDuration::zero()) WI_NOEXCEPT
+{
+    if (timer == nullptr)
+    {
+        return E_INVALIDARG;
+    }
+
+    FILETIME dueTime{};
+    DWORD periodMilliseconds{};
+    DWORD windowMilliseconds{};
+    RETURN_IF_FAILED(try_to_relative_file_time(due, &dueTime));
+    RETURN_IF_FAILED(details::try_to_dword_ms_with_maximum(period, (std::numeric_limits<DWORD>::max)(), &periodMilliseconds));
+    RETURN_IF_FAILED(details::try_to_dword_ms_with_maximum(window, (std::numeric_limits<DWORD>::max)(), &windowMilliseconds));
+    ::SetThreadpoolTimer(timer, &dueTime, periodMilliseconds, windowMilliseconds);
+    return S_OK;
+}
+
+template <typename... Args>
+void set_relative_threadpool_timer_failfast(Args&&... args) WI_NOEXCEPT
+{
+    FAIL_FAST_IF_FAILED(set_relative_threadpool_timer_nothrow(std::forward<Args>(args)...));
+}
+
+#if defined(WIL_ENABLE_EXCEPTIONS)
+template <typename... Args>
+void set_relative_threadpool_timer(Args&&... args)
+{
+    THROW_IF_FAILED(set_relative_threadpool_timer_nothrow(std::forward<Args>(args)...));
+}
+#endif
 
 /** Schedules a threadpool timer for an absolute C++/WinRT or system clock time.
 Use the `_nothrow` form to return conversion failures, the `_failfast` form when invalid values are fatal, or the throwing form
