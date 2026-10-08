@@ -13,6 +13,11 @@ using floating_milliseconds = std::chrono::duration<double, std::milli>;
 using third_seconds = std::chrono::duration<std::int64_t, std::ratio<1, 3>>;
 using unsigned_milliseconds = std::chrono::duration<std::uint64_t, std::milli>;
 
+constexpr std::uint64_t FileTimeValue(const FILETIME& value)
+{
+    return (static_cast<std::uint64_t>(value.dwHighDateTime) << 32) | value.dwLowDateTime;
+}
+
 template <typename Duration, typename = void>
 struct can_try_to_dword_ms : std::false_type
 {
@@ -58,29 +63,6 @@ static_assert(!can_try_to_dword_ms<unsigned_milliseconds>::value);
 static_assert(!can_to_float_ms<unsigned_milliseconds>::value);
 static_assert(!can_try_to_relative_file_time<unsigned_milliseconds>::value);
 
-TEST_CASE("ChronoTests::FileTimeHelpers", "[chrono]")
-{
-    const auto signedMinusOne = wil::filetime::from_int64(-1LL);
-    REQUIRE(signedMinusOne.dwLowDateTime == 0xffffffff);
-    REQUIRE(signedMinusOne.dwHighDateTime == 0xffffffff);
-    REQUIRE(wil::filetime::to_int64<std::int64_t>(signedMinusOne) == -1);
-
-    const FILETIME lowWordMaximum{0xffffffff, 0};
-    const auto carryToHighWord = wil::filetime::add(lowWordMaximum, 1);
-    REQUIRE(carryToHighWord.dwLowDateTime == 0);
-    REQUIRE(carryToHighWord.dwHighDateTime == 1);
-
-    const FILETIME highWordOne{0, 1};
-    const auto borrowFromHighWord = wil::filetime::add(highWordOne, -1);
-    REQUIRE(borrowFromHighWord.dwLowDateTime == 0xffffffff);
-    REQUIRE(borrowFromHighWord.dwHighDateTime == 0);
-
-    REQUIRE(wil::filetime::is_empty(FILETIME{}));
-    REQUIRE(!wil::filetime::is_empty(wil::filetime::from_int64(1)));
-    REQUIRE(wil::filetime::convert_msec_to_100ns(1) == 10000);
-    REQUIRE(wil::filetime::convert_100ns_to_msec(19999) == 1);
-}
-
 TEST_CASE("ChronoTests::DwordMilliseconds", "[chrono]")
 {
     DWORD value{};
@@ -114,19 +96,19 @@ TEST_CASE("ChronoTests::RelativeFileTime", "[chrono]")
     FILETIME value{};
 
     REQUIRE_SUCCEEDED(wil::try_to_relative_file_time(0ns, &value));
-    REQUIRE(wil::filetime::to_int64<std::uint64_t>(value) == 0);
+    REQUIRE(FileTimeValue(value) == 0);
 
     REQUIRE_SUCCEEDED(wil::try_to_relative_file_time(1ns, &value));
-    REQUIRE(wil::filetime::to_int64<std::uint64_t>(value) == static_cast<std::uint64_t>(-1LL));
+    REQUIRE(FileTimeValue(value) == static_cast<std::uint64_t>(-1LL));
 
     REQUIRE_SUCCEEDED(wil::try_to_relative_file_time(1ms, &value));
-    REQUIRE(wil::filetime::to_int64<std::uint64_t>(value) == static_cast<std::uint64_t>(-10000LL));
+    REQUIRE(FileTimeValue(value) == static_cast<std::uint64_t>(-10000LL));
 
     // INT64_MAX 100-nanosecond ticks is the largest supported relative interval. Its negative two's-complement
     // FILETIME representation is 0x8000000000000001.
     using file_time_duration = std::chrono::duration<std::int64_t, wil::file_time_period>;
     REQUIRE_SUCCEEDED(wil::try_to_relative_file_time(file_time_duration{(std::numeric_limits<std::int64_t>::max)()}, &value));
-    REQUIRE(wil::filetime::to_int64<std::uint64_t>(value) == 0x8000000000000001ULL);
+    REQUIRE(FileTimeValue(value) == 0x8000000000000001ULL);
 
     REQUIRE(wil::try_to_relative_file_time(-1ns, &value) == E_INVALIDARG);
 }

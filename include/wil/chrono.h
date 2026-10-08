@@ -14,7 +14,6 @@
 #define __WIL_CHRONO_INCLUDED
 
 #include "result_macros.h"
-#include "filetime_helpers.h"
 
 #if WIL_USE_STL && !defined(WIL_NO_CHRONO) && !defined(__WIL_MIN_KERNEL) && !defined(WIL_KERNEL_MODE)
 
@@ -27,10 +26,15 @@
 
 namespace wil
 {
-using file_time_period = std::ratio<1, filetime_duration::one_second>;
+using file_time_period = std::ratio<1, 10000000>;
 
 namespace details
 {
+    inline FILETIME file_time_from_uint64(std::uint64_t value) WI_NOEXCEPT
+    {
+        return {static_cast<DWORD>(value), static_cast<DWORD>(value >> 32)};
+    }
+
     template <typename Duration, typename TargetPeriod>
     struct is_supported_duration_conversion : std::false_type
     {
@@ -153,7 +157,7 @@ HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILE
     // SetThreadpoolTimer interprets negative 100-nanosecond counts as relative time. Form the two's-complement
     // representation explicitly; zero remains an immediate due time rather than a negative interval.
     const auto encoded = roundedTicks == 0 ? 0ULL : (~static_cast<std::uint64_t>(roundedTicks)) + 1;
-    *result = filetime::from_int64(encoded);
+    *result = details::file_time_from_uint64(encoded);
     return S_OK;
 }
 
@@ -239,7 +243,7 @@ inline HRESULT try_to_file_time(winrt::clock::time_point value, FILETIME* result
         return E_INVALIDARG;
     }
 
-    *result = filetime::from_int64(ticks);
+    *result = details::file_time_from_uint64(static_cast<std::uint64_t>(ticks));
     return S_OK;
 }
 
