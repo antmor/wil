@@ -6,15 +6,24 @@
 
 #include <inspectable.h> // Must be included before base.h
 
+#include <wil/chrono.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <wil/chrono.h>
 #include <wil/cppwinrt_helpers.h>
+#include <wil/resource.h>
 #include <wil/result.h>
 
 #include <format>
 
 #include "common.h"
+
+using namespace std::chrono_literals;
+
+static void CALLBACK SetCppWinRTEventTimerCallback(PTP_CALLBACK_INSTANCE, void* context, PTP_TIMER)
+{
+    ::SetEvent(static_cast<HANDLE>(context));
+}
 
 TEST_CASE("CppWinRTTests::CppWinRT20Test", "[cppwinrt]")
 {
@@ -36,14 +45,37 @@ TEST_CASE("CppWinRTTests::CppWinRT20Test", "[cppwinrt]")
 
 TEST_CASE("CppWinRTTests::ChronoInterop", "[cppwinrt][chrono]")
 {
-    const auto time = wil::clock::from_sys(std::chrono::system_clock::time_point{});
-    const auto dateTime = wil::to_winrt_datetime(time);
-    REQUIRE(wil::from_winrt_datetime(dateTime) == time);
-    REQUIRE(std::format("{:%Y-%m-%d %H:%M:%S}", wil::clock::to_sys(time)) == "1970-01-01 00:00:00.0000000");
+    constexpr std::int64_t c_unixEpochOffsetInFileTimeTicks = 116444736000000000LL;
 
-    const auto duration = wil::clock::duration{1234567};
-    REQUIRE(wil::from_winrt_timespan(wil::to_winrt_timespan(duration)) == duration);
+    const auto time = winrt::clock::from_sys(std::chrono::system_clock::time_point{});
+    REQUIRE(time.time_since_epoch().count() == c_unixEpochOffsetInFileTimeTicks);
+    REQUIRE(winrt::clock::to_sys(time) == std::chrono::system_clock::time_point{});
+    REQUIRE(std::format("{:%Y-%m-%d %H:%M:%S}", winrt::clock::to_sys(time)) == "1970-01-01 00:00:00.0000000");
 
-    const wil::file_time fileTime{0xfedcba9876543210ULL};
-    REQUIRE(wil::from_winrt_file_time(wil::to_winrt_file_time(fileTime)).value == fileTime.value);
+    FILETIME fileTime{};
+    REQUIRE_SUCCEEDED(wil::try_to_file_time(time, &fileTime));
+    REQUIRE(wil::filetime::to_int64<std::uint64_t>(fileTime) == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks));
+    REQUIRE_SUCCEEDED(wil::try_to_file_time(std::chrono::system_clock::time_point{}, &fileTime));
+    REQUIRE(wil::filetime::to_int64<std::uint64_t>(fileTime) == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks));
+
+    const SYSTEMTIME source{2024, 2, 0, 29, 12, 34, 56, 789};
+    winrt::clock::time_point systemTime{};
+    REQUIRE_SUCCEEDED(wil::try_from_system_time(source, &systemTime));
+
+    SYSTEMTIME roundTrip{};
+    REQUIRE_SUCCEEDED(wil::try_to_system_time(systemTime, &roundTrip));
+    REQUIRE(roundTrip.wYear == source.wYear);
+    REQUIRE(roundTrip.wMonth == source.wMonth);
+    REQUIRE(roundTrip.wDay == source.wDay);
+    REQUIRE(roundTrip.wHour == source.wHour);
+    REQUIRE(roundTrip.wMinute == source.wMinute);
+    REQUIRE(roundTrip.wSecond == source.wSecond);
+    REQUIRE(roundTrip.wMilliseconds == source.wMilliseconds);
+
+    wil::unique_event_nothrow event;
+    REQUIRE_SUCCEEDED(event.create(wil::EventOptions::ManualReset));
+    wil::unique_threadpool_timer timer{::CreateThreadpoolTimer(SetCppWinRTEventTimerCallback, event.get(), nullptr)};
+    REQUIRE(timer);
+    REQUIRE_SUCCEEDED(wil::set_threadpool_timer_nothrow(timer.get(), std::chrono::system_clock::now() + 1ms));
+    REQUIRE(event.wait(5s));
 }
