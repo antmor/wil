@@ -167,26 +167,26 @@ HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILE
     return S_OK;
 }
 
-inline HRESULT try_to_file_time(winrt::clock::time_point value, FILETIME* result) WI_NOEXCEPT
-{
-    const auto ticks = value.time_since_epoch().count();
-    if (ticks < 0)
-    {
-        return E_INVALIDARG;
-    }
-
-    *result = static_cast<FILETIME>(winrt::clock::to_file_time(value));
-    return S_OK;
-}
-
-inline HRESULT try_to_file_time(std::chrono::system_clock::time_point value, FILETIME* result) WI_NOEXCEPT
-{
-    static_assert(std::ratio_equal_v<std::chrono::system_clock::period, winrt::clock::period>, "system_clock must use the Windows FILETIME period");
-    return try_to_file_time(winrt::clock::from_sys(value), result);
-}
-
 namespace details
 {
+    inline HRESULT try_to_file_time(winrt::clock::time_point value, FILETIME* result) WI_NOEXCEPT
+    {
+        const auto ticks = value.time_since_epoch().count();
+        if (ticks < 0)
+        {
+            return E_INVALIDARG;
+        }
+
+        *result = static_cast<FILETIME>(winrt::clock::to_file_time(value));
+        return S_OK;
+    }
+
+    inline HRESULT try_to_file_time(std::chrono::system_clock::time_point value, FILETIME* result) WI_NOEXCEPT
+    {
+        static_assert(std::ratio_equal_v<std::chrono::system_clock::period, winrt::clock::period>, "system_clock must use the Windows FILETIME period");
+        return try_to_file_time(winrt::clock::from_sys(value), result);
+    }
+
     template <typename DueTime, typename PeriodDuration, typename WindowDuration>
     HRESULT set_threadpool_timer_nothrow_impl(PTP_TIMER timer, DueTime due, PeriodDuration period, WindowDuration window) WI_NOEXCEPT
     {

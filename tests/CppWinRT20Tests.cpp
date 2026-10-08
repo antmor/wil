@@ -74,9 +74,9 @@ TEST_CASE("CppWinRTTests::ChronoInterop", "[cppwinrt][chrono]")
     REQUIRE(std::format("{:%Y-%m-%d %H:%M:%S}", winrt::clock::to_sys(time)) == "1970-01-01 00:00:00.0000000");
 
     FILETIME fileTime{};
-    REQUIRE_SUCCEEDED(wil::try_to_file_time(time, &fileTime));
+    REQUIRE_SUCCEEDED(wil::details::try_to_file_time(time, &fileTime));
     REQUIRE(winrt::file_time{fileTime}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks));
-    REQUIRE_SUCCEEDED(wil::try_to_file_time(std::chrono::system_clock::time_point{}, &fileTime));
+    REQUIRE_SUCCEEDED(wil::details::try_to_file_time(std::chrono::system_clock::time_point{}, &fileTime));
     REQUIRE(winrt::file_time{fileTime}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks));
 }
 
