@@ -78,20 +78,6 @@ TEST_CASE("CppWinRTTests::ChronoInterop", "[cppwinrt][chrono]")
     REQUIRE(winrt::file_time{fileTime}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks));
     REQUIRE_SUCCEEDED(wil::try_to_file_time(std::chrono::system_clock::time_point{}, &fileTime));
     REQUIRE(winrt::file_time{fileTime}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks));
-
-    const SYSTEMTIME source{2024, 2, 0, 29, 12, 34, 56, 789};
-    winrt::clock::time_point systemTime{};
-    REQUIRE_SUCCEEDED(wil::try_from_system_time(source, &systemTime));
-
-    SYSTEMTIME roundTrip{};
-    REQUIRE_SUCCEEDED(wil::try_to_system_time(systemTime, &roundTrip));
-    REQUIRE(roundTrip.wYear == source.wYear);
-    REQUIRE(roundTrip.wMonth == source.wMonth);
-    REQUIRE(roundTrip.wDay == source.wDay);
-    REQUIRE(roundTrip.wHour == source.wHour);
-    REQUIRE(roundTrip.wMinute == source.wMinute);
-    REQUIRE(roundTrip.wSecond == source.wSecond);
-    REQUIRE(roundTrip.wMilliseconds == source.wMilliseconds);
 }
 
 TEST_CASE("CppWinRTTests::RelativeFileTimeAndTimer", "[cppwinrt][chrono]")

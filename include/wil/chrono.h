@@ -185,53 +185,6 @@ inline HRESULT try_to_file_time(std::chrono::system_clock::time_point value, FIL
     return try_to_file_time(winrt::clock::from_sys(value), result);
 }
 
-inline HRESULT try_to_system_time(winrt::clock::time_point value, SYSTEMTIME* result) WI_NOEXCEPT
-{
-    FILETIME fileTime{};
-    RETURN_IF_FAILED(try_to_file_time(value, &fileTime));
-    RETURN_IF_WIN32_BOOL_FALSE(::FileTimeToSystemTime(&fileTime, result));
-    return S_OK;
-}
-
-inline HRESULT try_from_system_time(const SYSTEMTIME& value, winrt::clock::time_point* result) WI_NOEXCEPT
-{
-    FILETIME fileTime{};
-    RETURN_IF_WIN32_BOOL_FALSE(::SystemTimeToFileTime(&value, &fileTime));
-
-    *result = winrt::clock::from_file_time(winrt::file_time{fileTime});
-    return S_OK;
-}
-
-inline SYSTEMTIME to_system_time_failfast(winrt::clock::time_point value) WI_NOEXCEPT
-{
-    SYSTEMTIME result{};
-    FAIL_FAST_IF_FAILED(try_to_system_time(value, &result));
-    return result;
-}
-
-inline winrt::clock::time_point from_system_time_failfast(const SYSTEMTIME& value) WI_NOEXCEPT
-{
-    winrt::clock::time_point result{};
-    FAIL_FAST_IF_FAILED(try_from_system_time(value, &result));
-    return result;
-}
-
-#if defined(WIL_ENABLE_EXCEPTIONS)
-inline SYSTEMTIME to_system_time(winrt::clock::time_point value)
-{
-    SYSTEMTIME result{};
-    THROW_IF_FAILED(try_to_system_time(value, &result));
-    return result;
-}
-
-inline winrt::clock::time_point from_system_time(const SYSTEMTIME& value)
-{
-    winrt::clock::time_point result{};
-    THROW_IF_FAILED(try_from_system_time(value, &result));
-    return result;
-}
-#endif
-
 namespace details
 {
     template <typename DueTime, typename PeriodDuration, typename WindowDuration>
