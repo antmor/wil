@@ -3,12 +3,57 @@
 #include <wil/chrono.h>
 #include <wil/resource.h>
 
-#include <cmath>
 #include <limits>
 
 #include "common.h"
 
 using namespace std::chrono_literals;
+
+using floating_milliseconds = std::chrono::duration<double, std::milli>;
+using third_seconds = std::chrono::duration<std::int64_t, std::ratio<1, 3>>;
+
+template <typename Duration, typename = void>
+struct can_try_to_dword_ms : std::false_type
+{
+};
+
+template <typename Duration>
+struct can_try_to_dword_ms<Duration, std::void_t<decltype(wil::try_to_dword_ms(std::declval<Duration>(), static_cast<DWORD*>(nullptr)))>>
+    : std::true_type
+{
+};
+
+template <typename Duration, typename = void>
+struct can_to_float_ms : std::false_type
+{
+};
+
+template <typename Duration>
+struct can_to_float_ms<Duration, std::void_t<decltype(wil::to_float_ms(std::declval<Duration>()))>> : std::true_type
+{
+};
+
+template <typename Duration, typename = void>
+struct can_try_to_relative_file_time : std::false_type
+{
+};
+
+template <typename Duration>
+struct can_try_to_relative_file_time<Duration, std::void_t<decltype(wil::try_to_relative_file_time(std::declval<Duration>(), static_cast<FILETIME*>(nullptr)))>>
+    : std::true_type
+{
+};
+
+template <typename TimePoint, typename = void>
+struct can_try_to_file_time : std::false_type
+{
+};
+
+template <typename TimePoint>
+struct can_try_to_file_time<TimePoint, std::void_t<decltype(wil::try_to_file_time(std::declval<TimePoint>(), static_cast<FILETIME*>(nullptr)))>>
+    : std::true_type
+{
+};
 
 static_assert(std::is_same_v<wil::clock::rep, std::int64_t>);
 static_assert(std::ratio_equal_v<wil::clock::period, std::ratio<1, 10000000>>);
@@ -16,6 +61,16 @@ static_assert(!wil::clock::is_steady);
 static_assert(sizeof(wil::file_time) == sizeof(FILETIME));
 static_assert(std::is_trivially_copyable_v<wil::file_time>);
 static_assert(wil::to_float_ms(1500us) == 1.5f);
+static_assert(can_try_to_dword_ms<std::chrono::nanoseconds>::value);
+static_assert(can_to_float_ms<std::chrono::seconds>::value);
+static_assert(can_try_to_relative_file_time<std::chrono::nanoseconds>::value);
+static_assert(!can_try_to_dword_ms<floating_milliseconds>::value);
+static_assert(!can_to_float_ms<floating_milliseconds>::value);
+static_assert(!can_try_to_relative_file_time<floating_milliseconds>::value);
+static_assert(!can_try_to_dword_ms<third_seconds>::value);
+static_assert(!can_to_float_ms<third_seconds>::value);
+static_assert(!can_try_to_file_time<std::chrono::time_point<std::chrono::system_clock, floating_milliseconds>>::value);
+static_assert(!can_try_to_file_time<std::chrono::time_point<std::chrono::system_clock, third_seconds>>::value);
 
 TEST_CASE("ChronoTests::FileTimeRoundTrip", "[chrono]")
 {
@@ -72,13 +127,10 @@ TEST_CASE("ChronoTests::DwordMilliseconds", "[chrono]")
     REQUIRE(value == 2);
     REQUIRE_SUCCEEDED(wil::try_to_dword_ms(2s, &value));
     REQUIRE(value == 2000);
-    REQUIRE_SUCCEEDED(wil::try_to_dword_ms(std::chrono::duration<double, std::milli>{1.25}, &value));
-    REQUIRE(value == 2);
     REQUIRE_SUCCEEDED(wil::try_to_dword_ms(std::chrono::milliseconds{INFINITE - 1}, &value));
     REQUIRE(value == INFINITE - 1);
 
     REQUIRE(wil::try_to_dword_ms(-1ms, &value) == E_INVALIDARG);
-    REQUIRE(wil::try_to_dword_ms(std::chrono::duration<double>{std::numeric_limits<double>::quiet_NaN()}, &value) == E_INVALIDARG);
     REQUIRE(
         wil::try_to_dword_ms(std::chrono::milliseconds{static_cast<std::int64_t>(INFINITE)}, &value) ==
         HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW));
@@ -89,7 +141,6 @@ TEST_CASE("ChronoTests::FloatMilliseconds", "[chrono]")
     REQUIRE(wil::to_float_ms(1ns) == Catch::Approx(0.000001f));
     REQUIRE(wil::to_float_ms(1500us) == Catch::Approx(1.5f));
     REQUIRE(wil::to_float_ms(-2s) == Catch::Approx(-2000.0f));
-    REQUIRE(std::isinf(wil::to_float_ms(std::chrono::duration<double>{std::numeric_limits<double>::infinity()})));
 }
 
 TEST_CASE("ChronoTests::RelativeFileTime", "[chrono]")
@@ -111,6 +162,11 @@ TEST_CASE("ChronoTests::RelativeFileTime", "[chrono]")
     REQUIRE(wil::file_time{value}.value == 0x8000000000000001ULL);
 
     REQUIRE(wil::try_to_relative_file_time(-1ns, &value) == E_INVALIDARG);
+    using unsigned_file_time_duration = std::chrono::duration<std::uint64_t, wil::file_time_period>;
+    REQUIRE(
+        wil::try_to_relative_file_time(
+            unsigned_file_time_duration{static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) + 1}, &value) ==
+        HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW));
 }
 
 TEST_CASE("ChronoTests::ClockEpochAndSystemTime", "[chrono]")
@@ -130,42 +186,31 @@ TEST_CASE("ChronoTests::ClockEpochAndSystemTime", "[chrono]")
 
     FILETIME adjacentToUnixEpoch{};
     REQUIRE_SUCCEEDED(wil::try_to_file_time(system_file_time_point{wil::clock::duration{1}}, &adjacentToUnixEpoch));
-    REQUIRE(
-        wil::file_time{adjacentToUnixEpoch}.value ==
-        static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks + 1));
+    REQUIRE(wil::file_time{adjacentToUnixEpoch}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks + 1));
     REQUIRE_SUCCEEDED(wil::try_to_file_time(system_file_time_point{wil::clock::duration{-1}}, &adjacentToUnixEpoch));
-    REQUIRE(
-        wil::file_time{adjacentToUnixEpoch}.value ==
-        static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks - 1));
+    REQUIRE(wil::file_time{adjacentToUnixEpoch}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks - 1));
 
-    using third_second_duration = std::chrono::duration<std::int64_t, std::ratio<1, 3>>;
-    using third_second_time_point = std::chrono::time_point<std::chrono::system_clock, third_second_duration>;
+    using system_nanosecond_time_point = std::chrono::time_point<std::chrono::system_clock, std::chrono::nanoseconds>;
     FILETIME fractionalSecond{};
-    REQUIRE_SUCCEEDED(wil::try_to_file_time(third_second_time_point{third_second_duration{1}}, &fractionalSecond));
-    REQUIRE(
-        wil::file_time{fractionalSecond}.value ==
-        static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks + 3333333));
-    REQUIRE_SUCCEEDED(wil::try_to_file_time(third_second_time_point{third_second_duration{-1}}, &fractionalSecond));
-    REQUIRE(
-        wil::file_time{fractionalSecond}.value ==
-        static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks - 3333334));
+    REQUIRE_SUCCEEDED(wil::try_to_file_time(system_nanosecond_time_point{1ns}, &fractionalSecond));
+    REQUIRE(wil::file_time{fractionalSecond}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks));
+    REQUIRE_SUCCEEDED(wil::try_to_file_time(system_nanosecond_time_point{-1ns}, &fractionalSecond));
+    REQUIRE(wil::file_time{fractionalSecond}.value == static_cast<std::uint64_t>(c_unixEpochOffsetInFileTimeTicks - 1));
 
     FILETIME fileTimeEpoch{};
-    REQUIRE_SUCCEEDED(wil::try_to_file_time(
-        system_file_time_point{wil::clock::duration{-c_unixEpochOffsetInFileTimeTicks}}, &fileTimeEpoch));
+    REQUIRE_SUCCEEDED(
+        wil::try_to_file_time(system_file_time_point{wil::clock::duration{-c_unixEpochOffsetInFileTimeTicks}}, &fileTimeEpoch));
     REQUIRE(wil::file_time{fileTimeEpoch}.value == 0);
     REQUIRE(
-        wil::try_to_file_time(
-            system_file_time_point{wil::clock::duration{-c_unixEpochOffsetInFileTimeTicks - 1}}, &fileTimeEpoch) ==
+        wil::try_to_file_time(system_file_time_point{wil::clock::duration{-c_unixEpochOffsetInFileTimeTicks - 1}}, &fileTimeEpoch) ==
         E_INVALIDARG);
 
     // Preserve low 100-nanosecond tick bits in a representative modern timestamp.
     constexpr std::int64_t c_modernFileTimeTicks = 133485408001234567LL;
     FILETIME modernFileTime{};
-    REQUIRE_SUCCEEDED(wil::try_to_file_time(
-        system_file_time_point{
-            wil::clock::duration{c_modernFileTimeTicks - c_unixEpochOffsetInFileTimeTicks}},
-        &modernFileTime));
+    REQUIRE_SUCCEEDED(
+        wil::try_to_file_time(
+            system_file_time_point{wil::clock::duration{c_modernFileTimeTicks - c_unixEpochOffsetInFileTimeTicks}}, &modernFileTime));
     REQUIRE(wil::file_time{modernFileTime}.value == static_cast<std::uint64_t>(c_modernFileTimeTicks));
 
     const SYSTEMTIME source{2024, 2, 0, 29, 12, 34, 56, 789};
@@ -214,11 +259,12 @@ TEST_CASE("ChronoTests::RelativeThreadpoolTimer", "[chrono]")
     REQUIRE(wil::set_relative_threadpool_timer_nothrow(timer.get(), -1ms) == E_INVALIDARG);
 
     // SetThreadpoolTimer treats any nonzero DWORD period/window as a value; INFINITE is not reserved for these parameters.
-    REQUIRE_SUCCEEDED(wil::set_relative_threadpool_timer_nothrow(
-        timer.get(),
-        1h,
-        std::chrono::milliseconds{static_cast<std::int64_t>((std::numeric_limits<DWORD>::max)())},
-        std::chrono::milliseconds{static_cast<std::int64_t>((std::numeric_limits<DWORD>::max)())}));
+    REQUIRE_SUCCEEDED(
+        wil::set_relative_threadpool_timer_nothrow(
+            timer.get(),
+            1h,
+            std::chrono::milliseconds{static_cast<std::int64_t>((std::numeric_limits<DWORD>::max)())},
+            std::chrono::milliseconds{static_cast<std::int64_t>((std::numeric_limits<DWORD>::max)())}));
 
     event.ResetEvent();
     REQUIRE_SUCCEEDED(wil::set_threadpool_timer_nothrow(timer.get(), std::chrono::system_clock::now() + 1ms));

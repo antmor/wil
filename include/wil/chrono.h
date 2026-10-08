@@ -39,8 +39,7 @@ struct file_time
     {
     }
 
-    constexpr file_time(const FILETIME& rawValue) WI_NOEXCEPT
-        : value(filetime::to_int64<std::uint64_t>(rawValue))
+    constexpr file_time(const FILETIME& rawValue) WI_NOEXCEPT : value(filetime::to_int64<std::uint64_t>(rawValue))
     {
     }
 
@@ -56,193 +55,135 @@ namespace details
     // (January 1, 1970 UTC).
     constexpr std::int64_t c_unixEpochOffsetInFileTimeTicks = 116444736000000000LL;
 
-    // 9223372036854775808 is 2^63, one past INT64_MAX, and is exactly representable as a floating-point value. Using this
-    // exclusive bound avoids converting INT64_MAX to long double, which rounds up to 2^63 on MSVC where long double has the
-    // same precision as double.
-    constexpr long double c_int64ExclusiveMaximum = 9223372036854775808.0L;
-
-    template <typename T>
-    struct is_chrono_duration : std::false_type
+    template <typename Duration, typename TargetPeriod>
+    struct is_supported_duration_conversion : std::false_type
     {
     };
 
-    template <typename Rep, typename Period>
-    struct is_chrono_duration<std::chrono::duration<Rep, Period>> : std::true_type
+    template <typename Rep, typename Period, typename TargetPeriod>
+    struct is_supported_duration_conversion<std::chrono::duration<Rep, Period>, TargetPeriod>
+        : std::bool_constant<std::is_integral_v<Rep> && ((std::ratio_divide<Period, TargetPeriod>::num == 1) || (std::ratio_divide<Period, TargetPeriod>::den == 1))>
     {
     };
-
-    template <typename Duration>
-    using enable_if_chrono_duration_t = std::enable_if_t<is_chrono_duration<Duration>::value, int>;
 
     template <typename Duration, typename TargetPeriod>
-    constexpr long double duration_count_as(Duration value) WI_NOEXCEPT
+    using duration_conversion_ratio_t = std::ratio_divide<typename Duration::period, TargetPeriod>;
+
+    template <typename Duration, typename TargetPeriod>
+    inline constexpr bool is_supported_duration_conversion_v = is_supported_duration_conversion<Duration, TargetPeriod>::value;
+
+    template <typename Duration, typename TargetPeriod>
+    using enable_if_supported_duration_conversion_t =
+        std::enable_if_t<is_supported_duration_conversion_v<Duration, TargetPeriod>, int>;
+
+    template <typename Duration, typename TargetPeriod>
+    HRESULT try_integral_duration_floor(Duration value, std::int64_t* result) WI_NOEXCEPT
     {
-        return std::chrono::duration<long double, TargetPeriod>{value}.count();
-    }
-
-    template <typename Duration>
-    using file_time_ratio_t = std::ratio_divide<typename Duration::period, file_time_period>;
-
-    inline HRESULT try_unsigned_multiply_divide(
-        std::uintmax_t multiplicand,
-        std::uintmax_t multiplier,
-        std::uintmax_t divisor,
-        std::uintmax_t maximum,
-        std::uintmax_t* result,
-        std::uintmax_t* remainderResult) WI_NOEXCEPT
-    {
-        const auto multiplierQuotient = multiplier / divisor;
-        const auto multiplierRemainder = multiplier % divisor;
-        std::uintmax_t quotient{};
-        std::uintmax_t remainder{};
-
-        for (int bitIndex = std::numeric_limits<std::uintmax_t>::digits - 1; bitIndex >= 0; --bitIndex)
-        {
-            const bool bit = ((multiplicand >> bitIndex) & 1) != 0;
-
-            if (quotient > maximum / 2)
-            {
-                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-            }
-            quotient *= 2;
-
-            if (bit)
-            {
-                if (multiplierQuotient > maximum - quotient)
-                {
-                    return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-                }
-                quotient += multiplierQuotient;
-            }
-
-            std::uintmax_t carry{};
-            if (remainder >= divisor - remainder)
-            {
-                remainder -= divisor - remainder;
-                ++carry;
-            }
-            else
-            {
-                remainder += remainder;
-            }
-
-            if (bit && multiplierRemainder != 0)
-            {
-                if (remainder >= divisor - multiplierRemainder)
-                {
-                    remainder -= divisor - multiplierRemainder;
-                    ++carry;
-                }
-                else
-                {
-                    remainder += multiplierRemainder;
-                }
-            }
-
-            if (carry > maximum - quotient)
-            {
-                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-            }
-            quotient += carry;
-        }
-
-        *result = quotient;
-        *remainderResult = remainder;
-        return S_OK;
-    }
-
-    template <typename Duration>
-    HRESULT try_integral_duration_floor_as_file_time_ticks(Duration value, std::int64_t* result) WI_NOEXCEPT
-    {
-        static_assert(std::is_integral_v<typename Duration::rep>);
-        using ratio = file_time_ratio_t<Duration>;
+        static_assert(is_supported_duration_conversion_v<Duration, TargetPeriod>);
+        using ratio = duration_conversion_ratio_t<Duration, TargetPeriod>;
         using rep = typename Duration::rep;
-        constexpr auto multiplier = static_cast<std::uintmax_t>(ratio::num);
-        constexpr auto divisor = static_cast<std::uintmax_t>(ratio::den);
 
         if constexpr (std::is_signed_v<rep>)
         {
             static_assert(sizeof(rep) <= sizeof(std::int64_t));
             const auto count = static_cast<std::int64_t>(value.count());
-            const bool negative = count < 0;
-            const auto magnitude = negative ?
-                                       static_cast<std::uintmax_t>(-(count + 1)) + 1 :
-                                       static_cast<std::uintmax_t>(count);
-            const auto maximumMagnitude =
-                negative ?
-                    static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)()) + 1 :
-                    static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)());
-
-            std::uintmax_t converted{};
-            std::uintmax_t remainder{};
-            RETURN_IF_FAILED(
-                try_unsigned_multiply_divide(magnitude, multiplier, divisor, maximumMagnitude, &converted, &remainder));
-
-            if (negative && remainder != 0)
+            if constexpr (ratio::den == 1)
             {
-                if (converted == maximumMagnitude)
+                if ((count > 0 && count > (std::numeric_limits<std::int64_t>::max)() / ratio::num) ||
+                    (count < 0 && count < (std::numeric_limits<std::int64_t>::min)() / ratio::num))
                 {
                     return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
                 }
-                ++converted;
-            }
-
-            if (negative)
-            {
-                *result = converted == maximumMagnitude ?
-                              (std::numeric_limits<std::int64_t>::min)() :
-                              -static_cast<std::int64_t>(converted);
+                *result = count * ratio::num;
             }
             else
             {
-                *result = static_cast<std::int64_t>(converted);
+                auto converted = count / ratio::den;
+                if ((count < 0) && ((count % ratio::den) != 0))
+                {
+                    --converted;
+                }
+                *result = converted;
             }
         }
         else
         {
             static_assert(sizeof(rep) <= sizeof(std::uint64_t));
             const auto count = static_cast<std::uint64_t>(value.count());
-            std::uintmax_t converted{};
-            std::uintmax_t remainder{};
-            RETURN_IF_FAILED(try_unsigned_multiply_divide(
-                count,
-                multiplier,
-                divisor,
-                static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)()),
-                &converted,
-                &remainder));
-            *result = static_cast<std::int64_t>(converted);
+            if constexpr (ratio::den == 1)
+            {
+                if (count > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) / ratio::num)
+                {
+                    return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+                }
+                *result = static_cast<std::int64_t>(count * ratio::num);
+            }
+            else
+            {
+                const auto converted = count / ratio::den;
+                if (converted > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+                {
+                    return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+                }
+                *result = static_cast<std::int64_t>(converted);
+            }
+        }
+
+        return S_OK;
+    }
+
+    template <typename Duration, typename TargetPeriod>
+    HRESULT try_nonnegative_duration_ceiling(Duration value, std::uintmax_t maximum, std::uintmax_t* result) WI_NOEXCEPT
+    {
+        static_assert(is_supported_duration_conversion_v<Duration, TargetPeriod>);
+        using ratio = duration_conversion_ratio_t<Duration, TargetPeriod>;
+        using rep = typename Duration::rep;
+
+        if constexpr (std::is_signed_v<rep>)
+        {
+            if (value.count() < 0)
+            {
+                return E_INVALIDARG;
+            }
+        }
+
+        static_assert(sizeof(rep) <= sizeof(std::uintmax_t));
+        const auto count = static_cast<std::uintmax_t>(value.count());
+        if constexpr (ratio::den == 1)
+        {
+            if (count > maximum / ratio::num)
+            {
+                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+            }
+            *result = count * ratio::num;
+        }
+        else
+        {
+            auto converted = count / ratio::den;
+            if ((count % ratio::den) != 0)
+            {
+                if (converted == maximum)
+                {
+                    return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+                }
+                ++converted;
+            }
+            if (converted > maximum)
+            {
+                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
+            }
+            *result = converted;
         }
 
         return S_OK;
     }
 
     template <typename Rep, typename Period>
-    HRESULT try_to_dword_ms_with_maximum(
-        std::chrono::duration<Rep, Period> value, DWORD maximum, DWORD* result) WI_NOEXCEPT
+    HRESULT try_to_dword_ms_with_maximum(std::chrono::duration<Rep, Period> value, DWORD maximum, DWORD* result) WI_NOEXCEPT
     {
-        const auto milliseconds = duration_count_as<std::chrono::duration<Rep, Period>, std::milli>(value);
-        if (!(milliseconds >= 0))
-        {
-            return E_INVALIDARG;
-        }
-
-        if (milliseconds > static_cast<long double>(maximum))
-        {
-            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-        }
-
-        auto converted = static_cast<DWORD>(milliseconds);
-        if (static_cast<long double>(converted) < milliseconds)
-        {
-            if (converted == maximum)
-            {
-                return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-            }
-            ++converted;
-        }
-
-        *result = converted;
+        std::uintmax_t converted{};
+        RETURN_IF_FAILED((try_nonnegative_duration_ceiling<std::chrono::duration<Rep, Period>, std::milli>(value, maximum, &converted)));
+        *result = static_cast<DWORD>(converted);
         return S_OK;
     }
 } // namespace details
@@ -267,7 +208,7 @@ struct clock
         return from_file_time(file_time{value});
     }
 
-    template <typename Duration>
+    template <typename Duration, details::enable_if_supported_duration_conversion_t<Duration, file_time_period> = 0>
     static constexpr file_time to_file_time(std::chrono::time_point<clock, Duration> value) WI_NOEXCEPT
     {
         return file_time{static_cast<std::uint64_t>(std::chrono::duration_cast<duration>(value.time_since_epoch()).count())};
@@ -312,23 +253,24 @@ private:
     }
 };
 
-//! Converts any chrono duration to fractional milliseconds for measurement and telemetry. Unlike `to_dword_ms`, this preserves
-//! negative values and follows normal floating-point behavior for NaN, infinity, precision loss, and overflow.
+//! Converts an integral chrono duration to fractional milliseconds for measurement and telemetry. Unlike `to_dword_ms`, this
+//! preserves negative values and fractions. Floating-point input durations and periods requiring both multiplication and division
+//! are intentionally unsupported; explicitly cast those values to a supported integral duration first.
 //! For example, `wil::to_float_ms(end - start)` converts an elapsed duration to a floating-point telemetry field.
-template <typename Rep, typename Period>
+template <typename Rep, typename Period, details::enable_if_supported_duration_conversion_t<std::chrono::duration<Rep, Period>, std::milli> = 0>
 constexpr float to_float_ms(std::chrono::duration<Rep, Period> value) WI_NOEXCEPT
 {
     return std::chrono::duration<float, std::milli>{value}.count();
 }
 
-//! Converts any chrono duration to a finite Win32 millisecond timeout, rounding positive fractions upward.
-template <typename Rep, typename Period>
+//! Converts a supported integral chrono duration to a finite Win32 millisecond timeout, rounding positive fractions upward.
+template <typename Rep, typename Period, details::enable_if_supported_duration_conversion_t<std::chrono::duration<Rep, Period>, std::milli> = 0>
 HRESULT try_to_dword_ms(std::chrono::duration<Rep, Period> value, DWORD* result) WI_NOEXCEPT
 {
     return details::try_to_dword_ms_with_maximum(value, INFINITE - 1, result);
 }
 
-template <typename Rep, typename Period>
+template <typename Rep, typename Period, details::enable_if_supported_duration_conversion_t<std::chrono::duration<Rep, Period>, std::milli> = 0>
 DWORD to_dword_ms_failfast(std::chrono::duration<Rep, Period> value) WI_NOEXCEPT
 {
     DWORD result{};
@@ -337,7 +279,7 @@ DWORD to_dword_ms_failfast(std::chrono::duration<Rep, Period> value) WI_NOEXCEPT
 }
 
 #if defined(WIL_ENABLE_EXCEPTIONS)
-template <typename Rep, typename Period>
+template <typename Rep, typename Period, details::enable_if_supported_duration_conversion_t<std::chrono::duration<Rep, Period>, std::milli> = 0>
 DWORD to_dword_ms(std::chrono::duration<Rep, Period> value)
 {
     DWORD result{};
@@ -347,119 +289,46 @@ DWORD to_dword_ms(std::chrono::duration<Rep, Period> value)
 #endif
 
 //! Encodes a nonnegative duration as the signed relative FILETIME representation used by threadpool timers.
-template <typename Rep, typename Period>
+template <typename Rep, typename Period, details::enable_if_supported_duration_conversion_t<std::chrono::duration<Rep, Period>, file_time_period> = 0>
 HRESULT try_to_relative_file_time(std::chrono::duration<Rep, Period> value, FILETIME* result) WI_NOEXCEPT
 {
-    std::int64_t roundedTicks{};
-    if constexpr (std::ratio_equal_v<Period, file_time_period> && std::is_integral_v<Rep>)
-    {
-        if constexpr (std::is_signed_v<Rep>)
-        {
-            if (value.count() < 0)
-            {
-                return E_INVALIDARG;
-            }
-        }
-
-        if (static_cast<std::uintmax_t>(value.count()) > static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)()))
-        {
-            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-        }
-        roundedTicks = static_cast<std::int64_t>(value.count());
-    }
-    else
-    {
-        const auto ticks = details::duration_count_as<std::chrono::duration<Rep, Period>, file_time_period>(value);
-        if (!(ticks >= 0))
-        {
-            return E_INVALIDARG;
-        }
-
-        if (ticks >= details::c_int64ExclusiveMaximum)
-        {
-            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-        }
-
-        roundedTicks = static_cast<std::int64_t>(ticks);
-        if (static_cast<long double>(roundedTicks) < ticks)
-        {
-            ++roundedTicks;
-        }
-    }
-
-    const auto encoded = roundedTicks == 0 ? 0ULL : static_cast<std::uint64_t>(-roundedTicks);
+    std::uintmax_t roundedTicks{};
+    RETURN_IF_FAILED((details::try_nonnegative_duration_ceiling<std::chrono::duration<Rep, Period>, file_time_period>(
+        value, static_cast<std::uintmax_t>((std::numeric_limits<std::int64_t>::max)()), &roundedTicks)));
+    const auto encoded = roundedTicks == 0 ? 0ULL : (~static_cast<std::uint64_t>(roundedTicks)) + 1;
     *result = filetime::from_int64(encoded);
     return S_OK;
 }
 
-template <typename Duration>
+template <typename Duration, details::enable_if_supported_duration_conversion_t<Duration, file_time_period> = 0>
 HRESULT try_to_file_time(std::chrono::time_point<clock, Duration> value, FILETIME* result) WI_NOEXCEPT
 {
-    if constexpr (std::is_integral_v<typename Duration::rep>)
+    std::int64_t ticks{};
+    RETURN_IF_FAILED((details::try_integral_duration_floor<Duration, file_time_period>(value.time_since_epoch(), &ticks)));
+    if (ticks < 0)
     {
-        std::int64_t ticks{};
-        RETURN_IF_FAILED(details::try_integral_duration_floor_as_file_time_ticks(value.time_since_epoch(), &ticks));
-        if (ticks < 0)
-        {
-            return E_INVALIDARG;
-        }
-        *result = filetime::from_int64(ticks);
+        return E_INVALIDARG;
     }
-    else
-    {
-        const auto ticks = details::duration_count_as<Duration, file_time_period>(value.time_since_epoch());
-        if (!(ticks >= 0))
-        {
-            return E_INVALIDARG;
-        }
-
-        if (ticks >= details::c_int64ExclusiveMaximum)
-        {
-            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-        }
-        *result = filetime::from_int64(static_cast<std::uint64_t>(ticks));
-    }
+    *result = filetime::from_int64(ticks);
     return S_OK;
 }
 
-template <typename Duration>
+template <typename Duration, details::enable_if_supported_duration_conversion_t<Duration, file_time_period> = 0>
 HRESULT try_to_file_time(std::chrono::time_point<std::chrono::system_clock, Duration> value, FILETIME* result) WI_NOEXCEPT
 {
-    if constexpr (std::is_integral_v<typename Duration::rep>)
+    std::int64_t ticksSinceUnixEpoch{};
+    RETURN_IF_FAILED((details::try_integral_duration_floor<Duration, file_time_period>(value.time_since_epoch(), &ticksSinceUnixEpoch)));
+
+    if (ticksSinceUnixEpoch < -details::c_unixEpochOffsetInFileTimeTicks)
     {
-        std::int64_t ticksSinceUnixEpoch{};
-        RETURN_IF_FAILED(
-            details::try_integral_duration_floor_as_file_time_ticks(value.time_since_epoch(), &ticksSinceUnixEpoch));
-
-        if (ticksSinceUnixEpoch < -details::c_unixEpochOffsetInFileTimeTicks)
-        {
-            return E_INVALIDARG;
-        }
-        if (ticksSinceUnixEpoch >
-            (std::numeric_limits<std::int64_t>::max)() - details::c_unixEpochOffsetInFileTimeTicks)
-        {
-            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-        }
-
-        *result = filetime::from_int64(ticksSinceUnixEpoch + details::c_unixEpochOffsetInFileTimeTicks);
+        return E_INVALIDARG;
     }
-    else
+    if (ticksSinceUnixEpoch > (std::numeric_limits<std::int64_t>::max)() - details::c_unixEpochOffsetInFileTimeTicks)
     {
-        const auto ticksSinceUnixEpoch = details::duration_count_as<Duration, file_time_period>(value.time_since_epoch());
-        const auto ticksSinceWindowsEpoch =
-            ticksSinceUnixEpoch + static_cast<long double>(details::c_unixEpochOffsetInFileTimeTicks);
-        if (!(ticksSinceWindowsEpoch >= 0))
-        {
-            return E_INVALIDARG;
-        }
-
-        if (ticksSinceWindowsEpoch >= details::c_int64ExclusiveMaximum)
-        {
-            return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
-        }
-
-        *result = filetime::from_int64(static_cast<std::uint64_t>(ticksSinceWindowsEpoch));
+        return HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW);
     }
+
+    *result = filetime::from_int64(ticksSinceUnixEpoch + details::c_unixEpochOffsetInFileTimeTicks);
     return S_OK;
 }
 
@@ -549,9 +418,9 @@ template <
     typename DueDuration,
     typename PeriodDuration = std::chrono::milliseconds,
     typename WindowDuration = std::chrono::milliseconds,
-    details::enable_if_chrono_duration_t<DueDuration> = 0,
-    details::enable_if_chrono_duration_t<PeriodDuration> = 0,
-    details::enable_if_chrono_duration_t<WindowDuration> = 0>
+    details::enable_if_supported_duration_conversion_t<DueDuration, file_time_period> = 0,
+    details::enable_if_supported_duration_conversion_t<PeriodDuration, std::milli> = 0,
+    details::enable_if_supported_duration_conversion_t<WindowDuration, std::milli> = 0>
 HRESULT set_relative_threadpool_timer_nothrow(
     PTP_TIMER timer, DueDuration due, PeriodDuration period = PeriodDuration::zero(), WindowDuration window = WindowDuration::zero()) WI_NOEXCEPT
 {
@@ -583,8 +452,9 @@ template <
     typename DueDuration,
     typename PeriodDuration = std::chrono::milliseconds,
     typename WindowDuration = std::chrono::milliseconds,
-    details::enable_if_chrono_duration_t<PeriodDuration> = 0,
-    details::enable_if_chrono_duration_t<WindowDuration> = 0>
+    details::enable_if_supported_duration_conversion_t<DueDuration, file_time_period> = 0,
+    details::enable_if_supported_duration_conversion_t<PeriodDuration, std::milli> = 0,
+    details::enable_if_supported_duration_conversion_t<WindowDuration, std::milli> = 0>
 HRESULT set_threadpool_timer_nothrow(
     PTP_TIMER timer,
     std::chrono::time_point<Clock, DueDuration> due,
